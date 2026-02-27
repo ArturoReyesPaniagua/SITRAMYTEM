@@ -1,28 +1,51 @@
-# 🔐 Módulo de Autenticación — Sistema de Oficios
+# 📋 Sistema de Gestión de Oficios — Backend API
+
+**Versión:** 2.0.0 | **Motor de BD:** PostgreSQL | **Runtime:** Node.js + Express
+
+---
 
 ## Estructura del proyecto
 
 ```
-auth-module/
+sistema-oficios-backend/
 ├── config/
-│   └── auth.js              # Configuración JWT, bcrypt, rate limit
+│   └── auth.js                    # Configuración JWT, bcrypt, rate limit
 ├── controllers/
-│   └── auth.controller.js   # Manejo de peticiones HTTP
+│   ├── auth.controller.js
+│   ├── areas.controller.js
+│   ├── usuarios.controller.js
+│   ├── proyectos.controller.js
+│   ├── oficios.controller.js      ← corregido
+│   ├── archivos.controller.js     ← NUEVO
+│   └── semaforos.controller.js    ← NUEVO
 ├── db/
-│   ├── pool.js              # Pool de conexiones PostgreSQL
-│   └── migrate.js           # Script de migraciones
+│   ├── pool.js                    # Pool de conexiones PostgreSQL
+│   └── migrate.js                 ← actualizado (todas las tablas)
 ├── middlewares/
-│   └── auth.middleware.js   # autenticar, requireRol, requireAreaOficio
+│   └── auth.middleware.js
 ├── routes/
-│   └── auth.routes.js       # Definición de rutas + validaciones
+│   ├── auth.routes.js
+│   ├── areas.routes.js
+│   ├── usuarios.routes.js
+│   ├── proyectos.routes.js
+│   ├── oficios.routes.js          ← corregido
+│   ├── archivos.routes.js         ← NUEVO (multer)
+│   └── semaforos.routes.js        ← NUEVO
 ├── services/
-│   └── auth.service.js      # Lógica de negocio
+│   ├── auth.service.js
+│   ├── areas.service.js
+│   ├── usuarios.service.js
+│   ├── proyectos.service.js
+│   ├── oficios.service.js         ← corregido (lógica por tipo de proceso)
+│   ├── archivos.service.js        ← NUEVO (versionado + auto-finalización)
+│   └── semaforos.service.js       ← NUEVO (cron en Node.js)
 ├── utils/
-│   ├── jwt.js               # Generación/verificación de tokens
-│   └── response.js          # Respuestas estandarizadas
-├── .env.example             # Variables de entorno requeridas
-├── package.json
-└── server.js                # Punto de entrada
+│   ├── jwt.js
+│   └── response.js
+├── uploads/                       # Archivos subidos (creado automáticamente)
+├── .env.example
+├── package.json                   ← multer agregado
+└── server.js                      ← cron de semáforos integrado
 ```
 
 ---
@@ -35,158 +58,210 @@ npm install
 
 # 2. Configurar variables de entorno
 cp .env.example .env
-# Edita .env con tus datos de PostgreSQL y secretos JWT
+# Editar .env con tus datos
 
-# 3. Crear tablas en la BD
+# 3. Crear tablas
 node db/migrate.js
 
-# 4. Arrancar servidor
-npm run dev      # desarrollo (con nodemon)
+# 4. Arrancar
+npm run dev      # desarrollo
 npm start        # producción
 ```
 
----
-
-## Variables de entorno requeridas
+## Variables de entorno
 
 | Variable | Descripción | Ejemplo |
 |---|---|---|
-| `DB_HOST` | Host de PostgreSQL | `localhost` |
-| `DB_PORT` | Puerto de PostgreSQL | `5432` |
-| `DB_NAME` | Nombre de la base de datos | `sistema_oficios` |
-| `DB_USER` | Usuario de PostgreSQL | `postgres` |
-| `DB_PASSWORD` | Contraseña de PostgreSQL | `mipassword` |
-| `JWT_SECRET` | Secreto para firmar access tokens (mín. 32 chars) | `cadena_muy_larga...` |
-| `JWT_REFRESH_SECRET` | Secreto para refresh tokens | `otra_cadena_larga...` |
+| `DB_HOST` | Host PostgreSQL | `localhost` |
+| `DB_PORT` | Puerto PostgreSQL | `5432` |
+| `DB_NAME` | Nombre BD | `sistema_oficios` |
+| `DB_USER` | Usuario BD | `postgres` |
+| `DB_PASSWORD` | Contraseña BD | `mipassword` |
+| `JWT_SECRET` | Secreto access token (≥32 chars) | `...` |
+| `JWT_REFRESH_SECRET` | Secreto refresh token | `...` |
+| `UPLOADS_DIR` | Carpeta de archivos | `./uploads` |
+| `FRONTEND_URL` | URL del frontend para CORS | `http://localhost:5173` |
+| `PORT` | Puerto del servidor | `3000` |
 
 ---
 
-## Endpoints
+## Endpoints API
 
-### `POST /api/auth/login`
+### Autenticación
 
-```json
-// Request
-{
-  "username": "admin",
-  "password": "Admin1234!"
-}
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| POST | `/api/auth/login` | Login con username/password |
+| POST | `/api/auth/refresh` | Renovar access token |
+| POST | `/api/auth/logout` | Cerrar sesión |
+| GET  | `/api/auth/me` | Datos del usuario autenticado |
+| PUT  | `/api/auth/password` | Cambiar contraseña propia |
 
-// Response 200
-{
-  "success": true,
-  "message": "Inicio de sesión exitoso",
-  "data": {
-    "accessToken": "eyJhbGc...",
-    "usuario": {
-      "id": 1,
-      "username": "admin",
-      "nombre_completo": "Administrador del Sistema",
-      "rol": "admin",
-      "area_id": null,
-      "area_nombre": null
-    }
-  }
-}
-```
+### Áreas
 
-### `POST /api/auth/refresh`
+| Método | Ruta | Descripción | Permisos |
+|--------|------|-------------|----------|
+| GET  | `/api/areas` | Listar áreas | Auth |
+| GET  | `/api/areas/:id` | Detalle de área | Auth |
+| GET  | `/api/areas/:id/usuarios` | Usuarios del área | Admin |
+| POST | `/api/areas` | Crear área | Admin |
+| PUT  | `/api/areas/:id` | Editar área | Admin |
+| PATCH | `/api/areas/:id/desactivar` | Desactivar | Admin |
+| PATCH | `/api/areas/:id/activar` | Activar | Admin |
 
-Renueva el access token usando el refresh token (cookie automática o body).
+### Usuarios
 
-```json
-// Response 200
-{
-  "success": true,
-  "data": { "accessToken": "eyJhbGc..." }
-}
-```
+| Método | Ruta | Descripción | Permisos |
+|--------|------|-------------|----------|
+| GET  | `/api/usuarios` | Listar usuarios | Auth |
+| GET  | `/api/usuarios/:id` | Detalle | Auth |
+| POST | `/api/usuarios` | Crear usuario | Admin |
+| PUT  | `/api/usuarios/:id` | Editar datos | Auth |
+| PATCH | `/api/usuarios/:id/rol` | Cambiar rol | Admin |
+| PATCH | `/api/usuarios/:id/password` | Reset password | Admin |
+| PATCH | `/api/usuarios/:id/desactivar` | Desactivar | Admin |
+| PATCH | `/api/usuarios/:id/activar` | Activar | Admin |
+| PATCH | `/api/usuarios/:id/desbloquear` | Desbloquear | Admin |
 
-### `POST /api/auth/logout`
+### Proyectos
 
-```json
-// Request (opcional, para cerrar TODAS las sesiones)
-{ "todos": true }
+| Método | Ruta | Descripción | Permisos |
+|--------|------|-------------|----------|
+| GET  | `/api/proyectos` | Listar (filtrado por área) | Auth |
+| GET  | `/api/proyectos/:id` | Detalle | Auth |
+| GET  | `/api/proyectos/:id/oficios` | Oficios del proyecto | Auth |
+| POST | `/api/proyectos` | Crear proyecto | Auth |
+| PUT  | `/api/proyectos/:id` | Editar | Auth (área propia o Admin) |
+| PATCH | `/api/proyectos/:id/estado` | Cambiar estado | Auth (área propia o Admin) |
 
-// Response 200
-{
-  "success": true,
-  "message": "Sesión cerrada exitosamente"
-}
-```
+### Oficios
 
-### `GET /api/auth/me`
+| Método | Ruta | Descripción | Permisos |
+|--------|------|-------------|----------|
+| GET  | `/api/oficios` | Listar (filtrado por área) | Auth |
+| GET  | `/api/oficios/alertas` | Oficios en amarillo/rojo | Auth |
+| GET  | `/api/oficios/:id` | Detalle + historial + archivos | Auth + área propia |
+| POST | `/api/oficios` | Crear oficio | Auth (ver reglas) |
+| PUT  | `/api/oficios/:id` | Editar datos básicos | Auth + área propia |
+| PATCH | `/api/oficios/:id/estado` | Cambiar estado | Auth + área propia |
+| PATCH | `/api/oficios/:id/asignar` | Asignar a área | Admin |
+| PATCH | `/api/oficios/:id/prioridad` | Cambiar prioridad | Admin |
 
-```
-Authorization: Bearer {accessToken}
-```
+**Query params disponibles en GET `/api/oficios`:**
+- `tipo` → `recibido_externo | iniciado_interno | informativo`
+- `prioridad` → `urgente | normal | informativo`
+- `estado` → `recibido | asignado | en_proceso | respondido | en_espera_acuse | finalizado | cancelado`
+- `area_id` → Solo Admin. Usuarios siempre ven su área.
+- `proyecto_id`
+- `busqueda` → Busca en número, asunto, promovente, destinatario
+- `pagina` / `limite`
 
-```json
-// Response 200
-{
-  "success": true,
-  "data": {
-    "id": 1,
-    "username": "admin",
-    "nombre_completo": "Administrador del Sistema",
-    "email": "admin@sistema.gob.mx",
-    "rol": "admin",
-    "area_id": null,
-    "ultimo_acceso": "2024-02-17T15:30:00Z"
-  }
-}
-```
+### Archivos
 
-### `PUT /api/auth/password`
+| Método | Ruta | Descripción | Permisos |
+|--------|------|-------------|----------|
+| GET  | `/api/archivos/oficio/:id` | Listar archivos de un oficio | Auth + área propia |
+| POST | `/api/archivos/oficio/:id` | Subir archivo | Auth + área propia |
+| GET  | `/api/archivos/:id/download` | Descargar archivo | Auth |
 
-```json
-// Request
-{
-  "passwordActual": "Admin1234!",
-  "passwordNuevo": "NuevoPass99!",
-  "confirmPassword": "NuevoPass99!"
-}
-```
+**POST `/api/archivos/oficio/:id`** — `multipart/form-data`:
+- `file` — Archivo (PDF, DOC, DOCX — máx. 50 MB)
+- `categoria` — Una de: `oficio_recibido`, `oficio_respuesta_word`, `oficio_respuesta_pdf`, `anexo`, `acuse`
 
----
+### Semáforos
 
-## Uso de middlewares en otros módulos
-
-```javascript
-const {
-  autenticar,
-  soloAdmin,
-  requireRol,
-  requireAreaOficio,
-} = require('./middlewares/auth.middleware');
-
-// Solo usuarios autenticados
-router.get('/oficios', autenticar, controller.listar);
-
-// Solo admin
-router.post('/areas', autenticar, soloAdmin, controller.crear);
-
-// Admin o usuario de área
-router.put('/oficios/:id', autenticar, requireAreaOficio, controller.editar);
-
-// Acceder a req.user en el controlador:
-// req.user.userId   → ID del usuario
-// req.user.rol      → 'admin' | 'usuario'
-// req.user.areaId   → ID del área (null si es admin)
-// req.user.username → username
-```
+| Método | Ruta | Descripción | Permisos |
+|--------|------|-------------|----------|
+| GET  | `/api/semaforos/dashboard` | Estadísticas por área | Auth |
+| GET  | `/api/semaforos/configuracion` | Leer configuración | Admin |
+| PUT  | `/api/semaforos/configuracion/:prioridad` | Actualizar configuración | Admin |
 
 ---
 
-## Seguridad implementada
+## Flujos de proceso (máquinas de estado)
 
-- **Contraseñas:** bcrypt con 12 rounds
-- **JWT:** Access token (8h) + Refresh token (7d)
-- **Refresh tokens:** Hasheados en BD, rotación en cada renovación
-- **Bloqueo:** 3 intentos fallidos → bloqueo de 15 minutos
-- **Rate limiting:** 5 intentos de login por ventana de 15 min
-- **Cookies:** httpOnly + SameSite=strict en producción
-- **Logs:** Todos los eventos de autenticación se registran
+### recibido_externo
+
+```
+recibido → asignado → en_proceso → respondido → en_espera_acuse → finalizado
+                                                                 ↗ (auto al subir acuse)
+Cancelado disponible desde cualquier estado no-terminal.
+```
+
+### iniciado_interno
+
+```
+en_proceso → respondido → en_espera_acuse → finalizado
+                                           ↗ (auto al subir acuse)
+Cancelado disponible desde cualquier estado no-terminal.
+```
+
+### informativo
+
+```
+recibido → asignado → finalizado
+Cancelado disponible desde cualquier estado no-terminal.
+```
+
+> **Nota:** El oficio informativo **no pasa por en_proceso ni por respuesta**. Su flujo termina directamente en finalizado desde asignado.
+
+---
+
+## Reglas de archivos por categoría
+
+| Categoría | Extensiones | Tipos de proceso permitidos | Efecto especial |
+|-----------|-------------|----------------------------|-----------------|
+| `oficio_recibido` | PDF | `recibido_externo` | — |
+| `oficio_respuesta_word` | DOC, DOCX | `recibido_externo`, `iniciado_interno` | — |
+| `oficio_respuesta_pdf` | PDF | `recibido_externo`, `iniciado_interno` | — |
+| `anexo` | PDF | Todos | — |
+| `acuse` | PDF | `recibido_externo`, `iniciado_interno` | **Auto-finaliza si estado = en_espera_acuse** |
+
+- Los archivos nunca se eliminan, solo se **versionan** (el registro anterior queda con `es_version_activa = false`).
+
+---
+
+## Reglas de permisos
+
+| Acción | Admin | Usuario |
+|--------|-------|---------|
+| Ver todos los oficios | ✅ | ❌ (solo su área) |
+| Crear oficio recibido_externo / informativo | ✅ | ❌ |
+| Crear oficio iniciado_interno | ✅ | ✅ (en su área) |
+| Asignar/reasignar área | ✅ | ❌ |
+| Cambiar prioridad | ✅ | ❌ |
+| Cambiar estado | ✅ | ✅ (si es de su área) |
+| Subir archivos | ✅ | ✅ (si es de su área) |
+| Ver dashboard completo | ✅ | ❌ (solo su área) |
+| Configurar semáforos | ✅ | ❌ |
+| Gestionar usuarios / áreas | ✅ | ❌ |
+
+---
+
+## Sistema de semáforos
+
+El semáforo se recalcula automáticamente **cada hora** mediante un `setInterval` en `server.js` (reemplaza el SQL Server Agent Job de la especificación original, ya que la BD es PostgreSQL).
+
+| Prioridad | Umbral amarillo | Umbral rojo |
+|-----------|-----------------|-------------|
+| urgente | 2 días | 5 días |
+| normal | 5 días | 15 días |
+| informativo | 10 días | 30 días |
+
+Los umbrales son configurables por el admin desde `PUT /api/semaforos/configuracion/:prioridad`.
+
+El semáforo también se recalcula al arrancar el servidor para sincronizar desde el primer momento.
+
+---
+
+## Seguridad
+
+- Contraseñas con bcrypt (12 rounds)
+- JWT access token (8h) + refresh token (7d) hasheado en BD
+- Bloqueo por 3 intentos fallidos de login (15 min)
+- Rate limiting global (300 req / 15 min)
+- Filtrado de área a nivel de query — los usuarios no pueden manipular `area_id` por parámetros
+- Validación de transiciones de estado por tipo de proceso en la capa de servicio
 
 ---
 
@@ -198,4 +273,19 @@ router.put('/oficios/:id', autenticar, requireAreaOficio, controller.editar);
 | password | `Admin1234!` |
 | rol | `admin` |
 
-> ⚠️ Cambia la contraseña inmediatamente después de instalar.
+> ⚠️ Cambiar contraseña después de instalar.
+
+---
+
+## Correcciones respecto a v1.0
+
+1. **Motor de BD**: La especificación mencionaba SQL Server pero el código usa PostgreSQL. Toda la documentación ahora refleja PostgreSQL correctamente.
+2. **Máquinas de estado por tipo de proceso**: `TRANSICIONES_VALIDAS` ahora es un mapa diferenciado por `tipo_proceso`. El oficio informativo ya no pasa por en_proceso/respondido/en_espera_acuse.
+3. **Filtro de área forzado en servidor**: El controller de oficios ignora `area_id` del query param cuando el usuario es de tipo `usuario`, forzando siempre `req.user.areaId`.
+4. **UPSERT en semáforo**: Se usa `ON CONFLICT` para que la creación del semáforo sea idempotente.
+5. **Auditoría de prioridad**: El historial ya no registra `estado_anterior === estado_nuevo` incorrectamente — el motivo describe el cambio de prioridad.
+6. **Módulo de archivos**: Completamente nuevo. Incluye multer, versionado, validación por categoría/tipo y auto-finalización al subir acuse.
+7. **Semáforos**: Reemplaza el SQL Server Agent Job por un `setInterval` en Node.js + queries PostgreSQL con `EXTRACT(DAY FROM NOW() - fecha_recepcion)`.
+8. **Ruta `/alertas`**: Declarada antes de `/:id` para evitar colisión de parámetros en Express.
+9. **Cancelación requiere motivo**: Validación añadida en `cambiarEstado`.
+10. **Dependencia multer**: Agregada a `package.json`.

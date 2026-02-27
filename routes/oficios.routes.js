@@ -1,7 +1,7 @@
 // routes/oficios.routes.js
 
 const express = require('express');
-const { body, param, query } = require('express-validator');
+const { body, param } = require('express-validator');
 const router = express.Router();
 
 const ctrl = require('../controllers/oficios.controller');
@@ -56,7 +56,7 @@ const validarCambiarEstado = [
     .withMessage('Estado inválido'),
   body('motivo')
     .optional({ nullable: true })
-    .isString(),
+    .isString().trim(),
 ];
 
 const validarAsignar = [
@@ -73,31 +73,25 @@ const validarPrioridad = [
 
 // ─── Rutas ───────────────────────────────────────────────────────────────────
 
-// GET  /api/oficios
-//   ?tipo=recibido_externo
-//   ?prioridad=urgente
-//   ?estado=en_proceso
-//   ?area_id=1          (solo admin)
-//   ?proyecto_id=1
-//   ?busqueda=texto
-//   ?pagina=1&limite=20
+// GET  /api/oficios/alertas → DEBE ir antes de /:id para no colisionar con el param
+router.get('/alertas', ctrl.alertas);
+
+// GET  /api/oficios          → Lista con filtros
 router.get('/', ctrl.listar);
 
-// GET /api/oficios/:id  → Detalle completo con historial y archivos
+// GET  /api/oficios/:id      → Detalle completo con historial y archivos
 router.get('/:id', validarId, requireAreaOficio, ctrl.obtener);
 
-// POST /api/oficios → Crear oficio
-//   Admin: puede crear cualquier tipo y asignar a cualquier área
-//   Usuario: solo iniciado_interno en su área
+// POST /api/oficios          → Crear oficio
 router.post('/', validarCrear, ctrl.crear);
 
-// PUT /api/oficios/:id → Editar datos básicos
+// PUT  /api/oficios/:id      → Editar datos básicos
 router.put('/:id', validarEditar, requireAreaOficio, ctrl.editar);
 
-// PATCH /api/oficios/:id/estado → Cambiar estado (con validación de transición)
+// PATCH /api/oficios/:id/estado   → Cambiar estado
 router.patch('/:id/estado', validarCambiarEstado, requireAreaOficio, ctrl.cambiarEstado);
 
-// PATCH /api/oficios/:id/asignar → Asignar a área (solo admin)
+// PATCH /api/oficios/:id/asignar  → Asignar a área (solo admin)
 router.patch('/:id/asignar', soloAdmin, validarAsignar, ctrl.asignar);
 
 // PATCH /api/oficios/:id/prioridad → Cambiar prioridad (solo admin)

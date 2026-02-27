@@ -4,15 +4,19 @@ const { validationResult } = require('express-validator');
 const oficiosService = require('../services/oficios.service');
 const { ok, created, badRequest, error } = require('../utils/response');
 
+// ─────────────────────────────────────────────────────────────────────────────
+
 const listar = async (req, res) => {
   try {
     const { tipo, prioridad, estado, proyecto_id, busqueda, pagina, limite } = req.query;
 
-    // Usuarios solo ven oficios de su área
-    const areaId = req.user.rol === 'usuario' ? req.user.areaId : req.query.area_id;
+    // Usuarios solo ven oficios de su área — forzado desde el servidor, no desde query params
+    const areaId = req.user.rol === 'usuario'
+      ? req.user.areaId
+      : (req.query.area_id ? parseInt(req.query.area_id) : undefined);
 
     const resultado = await oficiosService.listar({
-      areaId:     areaId ? parseInt(areaId) : undefined,
+      areaId,
       tipo, prioridad, estado,
       proyectoId: proyecto_id ? parseInt(proyecto_id) : undefined,
       busqueda,
@@ -41,14 +45,17 @@ const crear = async (req, res) => {
   if (!errors.isEmpty()) return badRequest(res, 'Datos inválidos', errors.array());
 
   try {
-    // Usuarios solo pueden crear oficios en su área
-    const area_asignada_id = req.user.rol === 'usuario'
-      ? req.user.areaId
-      : req.body.area_asignada_id;
+    // Usuarios solo pueden crear oficios de tipo iniciado_interno en su área
+    if (req.user.rol === 'usuario') {
+      if (req.body.tipo_proceso !== 'iniciado_interno') {
+        return badRequest(res, 'Los usuarios solo pueden crear oficios de tipo "iniciado_interno"');
+      }
+      // El área es siempre la del usuario — ignorar body.area_asignada_id
+      req.body.area_asignada_id = req.user.areaId;
+    }
 
     const oficio = await oficiosService.crear({
       ...req.body,
-      area_asignada_id,
       usuarioId: req.user.userId,
     });
 
@@ -124,4 +131,15 @@ const cambiarPrioridad = async (req, res) => {
   }
 };
 
-module.exports = { listar, obtener, crear, editar, cambiarEstado, asignar, cambiarPrioridad };
+// GET /api/oficios/alertas → Oficios en amarillo o rojo
+const alertas = async (req, res) => {
+  try {
+    const areaId = req.user.rol === 'usuario' ? req.user.areaId : undefined;
+    const data = await oficiosService.obtenerAlertas({ areaId });
+    return ok(res, data);
+  } catch (err) {
+    return error(res);
+  }
+};
+
+module.exports = { listar, obtener, crear, editar, cambiarEstado, asignar, cambiarPrioridad, alertas };

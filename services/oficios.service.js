@@ -6,33 +6,108 @@ const { query, withTransaction } = require('../db/pool');
 // CONSTANTES
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Transiciones válidas POR TIPO DE PROCESO.
+ *
+ * recibido_externo: 7 estados (recibido → asignado → en_proceso → respondido → en_espera_acuse → finalizado)
+ * iniciado_interno: 5 estados (en_proceso → respondido → en_espera_acuse → finalizado)
+ * informativo:      3 estados (recibido → asignado → finalizado)
+ *
+ * Cancelado siempre disponible desde cualquier estado no-terminal.
+ */
 const TRANSICIONES_VALIDAS = {
-  recibido:          ['asignado', 'cancelado'],
-  asignado:          ['en_proceso', 'cancelado'],
-  en_proceso:        ['respondido', 'cancelado'],
-  respondido:        ['en_espera_acuse', 'cancelado'],
-  en_espera_acuse:   ['finalizado', 'cancelado'],
-  finalizado:        [],
-  cancelado:         [],
+  recibido_externo: {
+    recibido:        ['asignado', 'cancelado'],
+    asignado:        ['en_proceso', 'cancelado'],
+    en_proceso:      ['respondido', 'cancelado'],
+    respondido:      ['en_espera_acuse', 'cancelado'],
+    en_espera_acuse: ['finalizado', 'cancelado'],
+    finalizado:      [],
+    cancelado:       [],
+  },
+  iniciado_interno: {
+    en_proceso:      ['respondido', 'cancelado'],
+    respondido:      ['en_espera_acuse', 'cancelado'],
+    en_espera_acuse: ['finalizado', 'cancelado'],
+    finalizado:      [],
+    cancelado:       [],
+  },
+  informativo: {
+    recibido:        ['asignado', 'cancelado'],
+    asignado:        ['finalizado', 'cancelado'],
+    finalizado:      [],
+    cancelado:       [],
+  },
 };
 
-// Oficios internos arrancan directamente en en_proceso
 const ESTADO_INICIAL = {
-  recibido_externo:   'recibido',
-  iniciado_interno:   'en_proceso',
-  informativo:        'recibido',
+  recibido_externo: 'recibido',
+  iniciado_interno: 'en_proceso',
+  informativo:      'recibido',
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPERS INTERNOS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Retorna la configuración del semáforo para una prioridad dada.
+ * Si no existe en BD, usa valores por defecto seguros.
+ */
+const _obtenerConfigSemaforo = async (client, prioridad) => {
+  const res = await client.query(
+    `SELECT dias_verde, dias_rojo FROM configuracion_semaforo WHERE prioridad = $1`,
+    [prioridad]
+  );
+  return res.rows[0] || { dias_verde: 5, dias_rojo: 15 };
+};
+
+/**
+ * Inserta o actualiza el registro de semáforo para un oficio.
+ * Siempre usa UPSERT para evitar errores si el registro ya existe.
+ */
+const _upsertSemaforo = async (client, oficioId, prioridad) => {
+  const config = await _obtenerConfigSemaforo(client, prioridad);
+  await client.query(
+    `INSERT INTO semaforo_tiempo
+       (oficio_id, estado_semaforo, dias_transcurridos, dias_limite_amarillo, dias_limite_rojo)
+     VALUES ($1, 'verde', 0, $2, $3)
+     ON CONFLICT (oficio_id)
+     DO UPDATE SET dias_limite_amarillo = $2, dias_limite_rojo = $3`,
+    [oficioId, config.dias_verde, config.dias_rojo]
+  );
+};
+
+/**
+ * Valida que la transición solicitada sea válida para el tipo de proceso del oficio.
+ */
+const _validarTransicion = (tipoProceso, estadoActual, nuevoEstado) => {
+  const mapa = TRANSICIONES_VALIDAS[tipoProceso];
+  if (!mapa) throw { status: 400, message: `Tipo de proceso desconocido: ${tipoProceso}` };
+
+  const permitidos = mapa[estadoActual];
+  if (!permitidos) throw { status: 409, message: `Estado actual inválido para este tipo de proceso: ${estadoActual}` };
+
+  if (!permitidos.includes(nuevoEstado)) {
+    throw {
+      status: 409,
+      message: `No se puede cambiar de "${estadoActual}" a "${nuevoEstado}" en un oficio de tipo "${tipoProceso}"`,
+    };
+  }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LISTAR
 // ─────────────────────────────────────────────────────────────────────────────
 
-const listar = async ({ areaId, tipo, prioridad, estado, proyectoId, busqueda, pagina = 1, limite = 20 } = {}) => {
+const listar = async ({
+  areaId, tipo, prioridad, estado, proyectoId,
+  busqueda, pagina = 1, limite = 20,
+} = {}) => {
   const condiciones = [];
   const params = [];
   let idx = 1;
 
-  // Filtro por área (usuarios solo ven la suya)
   if (areaId) {
     condiciones.push(`o.area_asignada_id = $${idx++}`);
     params.push(areaId);
@@ -67,47 +142,42 @@ const listar = async ({ areaId, tipo, prioridad, estado, proyectoId, busqueda, p
   const where  = condiciones.length ? `WHERE ${condiciones.join(' AND ')}` : '';
   const offset = (pagina - 1) * limite;
 
-  // Query principal con paginación
   const [dataResult, countResult] = await Promise.all([
     query(
       `SELECT
          o.id, o.numero_oficio, o.tipo_proceso, o.prioridad, o.estado,
          o.asunto, o.promovente, o.destinatario,
-         o.fecha_recepcion, o.fecha_asignacion, o.fecha_respuesta,
-         o.fecha_acuse, o.fecha_finalizacion, o.fecha_creacion,
-         o.area_asignada_id, a.nombre AS area_nombre,
-         o.proyecto_id,      p.nombre AS proyecto_nombre,
-         o.creado_por,       u.nombre_completo AS creado_por_nombre,
-         s.estado_semaforo,  s.dias_transcurridos
+         o.fecha_recepcion, o.fecha_asignacion, o.fecha_respuesta, o.fecha_finalizacion,
+         o.proyecto_id,
+         a.nombre  AS area_nombre,
+         p.nombre  AS proyecto_nombre,
+         s.estado_semaforo, s.dias_transcurridos
        FROM oficios o
        LEFT JOIN areas a           ON o.area_asignada_id = a.id
        LEFT JOIN proyectos p       ON o.proyecto_id      = p.id
-       LEFT JOIN usuarios u        ON o.creado_por       = u.id
        LEFT JOIN semaforo_tiempo s ON o.id               = s.oficio_id
        ${where}
-       ORDER BY
-         CASE o.prioridad WHEN 'urgente' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
-         o.fecha_recepcion DESC
-       LIMIT $${idx} OFFSET $${idx + 1}`,
+       ORDER BY o.fecha_recepcion DESC
+       LIMIT $${idx++} OFFSET $${idx++}`,
       [...params, limite, offset]
     ),
     query(
-      `SELECT COUNT(*) AS total FROM oficios o ${where}`,
+      `SELECT COUNT(*) FROM oficios o ${where}`,
       params
     ),
   ]);
 
-  const total  = parseInt(countResult.rows[0].total);
-  const paginas = Math.ceil(total / limite);
-
   return {
-    data: dataResult.rows,
-    paginacion: { total, pagina, limite, paginas },
+    data:       dataResult.rows,
+    total:      parseInt(countResult.rows[0].count),
+    pagina,
+    limite,
+    totalPaginas: Math.ceil(parseInt(countResult.rows[0].count) / limite),
   };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// OBTENER UNO (con historial y archivos)
+// OBTENER POR ID
 // ─────────────────────────────────────────────────────────────────────────────
 
 const obtenerPorId = async (id) => {
@@ -169,46 +239,18 @@ const obtenerPorId = async (id) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const crear = async ({
-  numero_oficio, tipo_proceso, prioridad,
-  area_asignada_id, proyecto_id,
-  promovente, destinatario, asunto,
-  fecha_recepcion, observaciones,
-  usuarioId,
+  numero_oficio, tipo_proceso, prioridad, area_asignada_id,
+  proyecto_id, promovente, destinatario, asunto,
+  fecha_recepcion, observaciones, usuarioId,
 }) => {
-  // Verificar número único
-  const existe = await query(
-    `SELECT id FROM oficios WHERE numero_oficio = $1`, [numero_oficio]
-  );
-  if (existe.rowCount > 0) {
-    throw { status: 409, message: `El número de oficio "${numero_oficio}" ya existe` };
-  }
-
-  // Verificar área activa
-  const area = await query(
-    `SELECT id FROM areas WHERE id = $1 AND activo = true`, [area_asignada_id]
-  );
-  if (area.rowCount === 0) {
-    throw { status: 404, message: 'Área asignada no encontrada o inactiva' };
-  }
-
-  // Verificar proyecto si se proporcionó
-  if (proyecto_id) {
-    const proyecto = await query(
-      `SELECT id, area_id FROM proyectos WHERE id = $1 AND activo = true`, [proyecto_id]
-    );
-    if (proyecto.rowCount === 0) {
-      throw { status: 404, message: 'Proyecto no encontrado o inactivo' };
-    }
-    // El proyecto debe pertenecer al mismo área
-    if (proyecto.rows[0].area_id !== parseInt(area_asignada_id)) {
-      throw { status: 400, message: 'El proyecto no pertenece al área asignada' };
-    }
+  // Validar tipo
+  if (!ESTADO_INICIAL[tipo_proceso]) {
+    throw { status: 400, message: `tipo_proceso inválido: ${tipo_proceso}` };
   }
 
   const estadoInicial = ESTADO_INICIAL[tipo_proceso];
 
   const oficio = await withTransaction(async (client) => {
-    // Insertar oficio
     const result = await client.query(
       `INSERT INTO oficios (
          numero_oficio, tipo_proceso, prioridad, estado,
@@ -218,7 +260,7 @@ const crear = async ({
          fecha_asignacion
        )
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-         CASE WHEN $3 = 'iniciado_interno' THEN NOW() ELSE NULL END
+         CASE WHEN $2 = 'iniciado_interno' THEN NOW() ELSE NULL END
        )
        RETURNING *`,
       [
@@ -231,70 +273,44 @@ const crear = async ({
 
     const nuevoOficio = result.rows[0];
 
-    // Registrar en historial
+    // Historial inicial
     await client.query(
-      `INSERT INTO historial_estado (oficio_id, estado_anterior, estado_nuevo, usuario_id, motivo)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [nuevoOficio.id, 'ninguno', estadoInicial, usuarioId, 'Oficio creado']
+      `INSERT INTO historial_estado
+         (oficio_id, estado_anterior, estado_nuevo, usuario_id, motivo)
+       VALUES ($1, 'ninguno', $2, $3, 'Oficio creado')`,
+      [nuevoOficio.id, estadoInicial, usuarioId]
     );
 
-    // Crear semáforo
-    const configSemaforo = await client.query(
-      `SELECT dias_verde, dias_rojo FROM configuracion_semaforo WHERE prioridad = $1`,
-      [prioridad]
-    );
-    const config = configSemaforo.rows[0] || { dias_verde: 5, dias_rojo: 15 };
-
-    await client.query(
-      `INSERT INTO semaforo_tiempo
-         (oficio_id, estado_semaforo, dias_transcurridos, dias_limite_amarillo, dias_limite_rojo)
-       VALUES ($1, 'verde', 0, $2, $3)`,
-      [nuevoOficio.id, config.dias_verde, config.dias_rojo]
-    );
+    // Semáforo — usa UPSERT para ser idempotente
+    await _upsertSemaforo(client, nuevoOficio.id, prioridad);
 
     return nuevoOficio;
   });
 
-  return oficio;
+  return obtenerPorId(oficio.id);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// EDITAR (solo datos básicos, no estado)
+// EDITAR
 // ─────────────────────────────────────────────────────────────────────────────
 
-const editar = async (id, { asunto, promovente, destinatario, observaciones, proyecto_id }, usuarioId) => {
+const editar = async (id, { asunto, observaciones, proyecto_id }, usuarioId) => {
   const oficio = await obtenerPorId(id);
 
   if (['finalizado', 'cancelado'].includes(oficio.estado)) {
-    throw { status: 409, message: 'No se puede editar un oficio finalizado o cancelado' };
-  }
-
-  // Validar proyecto si cambia
-  if (proyecto_id !== undefined) {
-    if (proyecto_id) {
-      const proyecto = await query(
-        `SELECT area_id FROM proyectos WHERE id = $1 AND activo = true`, [proyecto_id]
-      );
-      if (proyecto.rowCount === 0) throw { status: 404, message: 'Proyecto no encontrado' };
-      if (proyecto.rows[0].area_id !== parseInt(oficio.area_asignada_id)) {
-        throw { status: 400, message: 'El proyecto no pertenece al área del oficio' };
-      }
-    }
+    throw { status: 409, message: 'No se puede editar un oficio en estado terminal' };
   }
 
   const result = await query(
     `UPDATE oficios
-     SET asunto       = COALESCE($1, asunto),
-         promovente   = COALESCE($2, promovente),
-         destinatario = COALESCE($3, destinatario),
-         observaciones = COALESCE($4, observaciones),
-         proyecto_id  = CASE WHEN $5::INT IS NOT NULL THEN $5 ELSE proyecto_id END,
-         modificado_por       = $6,
-         fecha_modificacion   = NOW()
-     WHERE id = $7
+     SET asunto = COALESCE($1, asunto),
+         observaciones = $2,
+         proyecto_id = $3,
+         modificado_por = $4,
+         fecha_modificacion = NOW()
+     WHERE id = $5
      RETURNING *`,
-    [asunto || null, promovente || null, destinatario || null,
-     observaciones || null, proyecto_id ?? null, usuarioId, id]
+    [asunto || null, observaciones ?? oficio.observaciones, proyecto_id ?? oficio.proyecto_id, usuarioId, id]
   );
 
   return result.rows[0];
@@ -308,95 +324,102 @@ const cambiarEstado = async (id, nuevoEstado, usuarioId, motivo = null) => {
   const oficio = await obtenerPorId(id);
   const estadoActual = oficio.estado;
 
-  // Validar transición
-  if (!TRANSICIONES_VALIDAS[estadoActual]?.includes(nuevoEstado)) {
-    throw {
-      status: 409,
-      message: `No se puede cambiar de "${estadoActual}" a "${nuevoEstado}"`,
-    };
-  }
+  // Validar transición según tipo de proceso
+  _validarTransicion(oficio.tipo_proceso, estadoActual, nuevoEstado);
 
-  // Finalización manual requiere motivo
-  if (nuevoEstado === 'finalizado' && !motivo) {
-    // Solo es obligatorio si no hay acuse subido
-    const acuse = await query(
-      `SELECT id FROM archivos_oficio
-       WHERE oficio_id = $1 AND categoria = 'acuse' AND es_version_activa = true`,
-      [id]
-    );
-    if (acuse.rowCount === 0) {
-      throw { status: 400, message: 'Se requiere motivo para finalización manual sin acuse' };
+  // Finalización manual sin acuse requiere motivo
+  if (nuevoEstado === 'finalizado' && oficio.tipo_proceso !== 'informativo') {
+    if (!motivo || motivo.trim() === '') {
+      const acuse = await query(
+        `SELECT id FROM archivos_oficio
+         WHERE oficio_id = $1 AND categoria = 'acuse' AND es_version_activa = true`,
+        [id]
+      );
+      if (acuse.rowCount === 0) {
+        throw { status: 400, message: 'Se requiere motivo para finalización manual sin acuse' };
+      }
     }
   }
 
+  // Cancelación siempre requiere motivo
+  if (nuevoEstado === 'cancelado' && (!motivo || motivo.trim() === '')) {
+    throw { status: 400, message: 'Se requiere motivo para cancelar un oficio' };
+  }
+
   await withTransaction(async (client) => {
-    // Registrar en historial
+    // Fechas automáticas por estado
+    const camposFecha = {
+      asignado:        `fecha_asignacion   = NOW(),`,
+      respondido:      `fecha_respuesta    = NOW(),`,
+      en_espera_acuse: ``,
+      en_proceso:      ``,
+      finalizado:      `fecha_finalizacion = NOW(),`,
+      cancelado:       `fecha_finalizacion = NOW(),`,
+    };
+
     await client.query(
-      `INSERT INTO historial_estado (oficio_id, estado_anterior, estado_nuevo, usuario_id, motivo)
+      `UPDATE oficios
+       SET estado = $1,
+           ${camposFecha[nuevoEstado] || ''}
+           modificado_por = $2,
+           fecha_modificacion = NOW()
+       WHERE id = $3`,
+      [nuevoEstado, usuarioId, id]
+    );
+
+    await client.query(
+      `INSERT INTO historial_estado
+         (oficio_id, estado_anterior, estado_nuevo, usuario_id, motivo)
        VALUES ($1, $2, $3, $4, $5)`,
       [id, estadoActual, nuevoEstado, usuarioId, motivo]
     );
 
-    // Fechas automáticas según estado
-    const fechasCampo = {
-      asignado:        'fecha_asignacion   = NOW(),',
-      respondido:      'fecha_respuesta    = NOW(),',
-      en_espera_acuse: '',
-      finalizado:      'fecha_finalizacion = NOW(),',
-      cancelado:       'fecha_finalizacion = NOW(),',
-    };
-
-    const fechaExtra = fechasCampo[nuevoEstado] || '';
-
-    await client.query(
-      `UPDATE oficios
-       SET estado    = $1,
-           ${fechaExtra}
-           motivo_finalizacion_manual = CASE WHEN $1 = 'finalizado' THEN $2 ELSE motivo_finalizacion_manual END,
-           modificado_por     = $3,
-           fecha_modificacion = NOW()
-       WHERE id = $4`,
-      [nuevoEstado, motivo, usuarioId, id]
-    );
+    // Si pasa a estado terminal, marcar semáforo como inactivo (no eliminar)
+    if (['finalizado', 'cancelado'].includes(nuevoEstado)) {
+      await client.query(
+        `UPDATE semaforo_tiempo SET estado_semaforo = 'verde', dias_transcurridos = 0
+         WHERE oficio_id = $1`,
+        [id]
+      );
+    }
   });
 
   return obtenerPorId(id);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ASIGNAR A ÁREA (solo admin)
+// ASIGNAR ÁREA (solo admin)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const asignar = async (id, areaId, usuarioId) => {
   const oficio = await obtenerPorId(id);
 
   if (['finalizado', 'cancelado'].includes(oficio.estado)) {
-    throw { status: 409, message: 'No se puede reasignar un oficio finalizado o cancelado' };
+    throw { status: 409, message: 'No se puede reasignar un oficio en estado terminal' };
   }
 
-  const area = await query(
-    `SELECT id FROM areas WHERE id = $1 AND activo = true`, [areaId]
+  // Validar que el área existe y está activa
+  const areaResult = await query(
+    `SELECT id, nombre FROM areas WHERE id = $1 AND activo = true`,
+    [areaId]
   );
-  if (area.rowCount === 0) {
+  if (areaResult.rowCount === 0) {
     throw { status: 404, message: 'Área no encontrada o inactiva' };
   }
 
   await withTransaction(async (client) => {
     await client.query(
       `UPDATE oficios
-       SET area_asignada_id  = $1,
-           estado            = 'asignado',
-           fecha_asignacion  = NOW(),
-           modificado_por    = $2,
-           fecha_modificacion = NOW()
+       SET area_asignada_id = $1, modificado_por = $2, fecha_modificacion = NOW()
        WHERE id = $3`,
       [areaId, usuarioId, id]
     );
 
     await client.query(
-      `INSERT INTO historial_estado (oficio_id, estado_anterior, estado_nuevo, usuario_id, motivo)
-       VALUES ($1, $2, 'asignado', $3, $4)`,
-      [id, oficio.estado, usuarioId, `Asignado al área ID ${areaId}`]
+      `INSERT INTO historial_estado
+         (oficio_id, estado_anterior, estado_nuevo, usuario_id, motivo)
+       VALUES ($1, $2, $2, $3, $4)`,
+      [id, oficio.estado, usuarioId, `Reasignado al área "${areaResult.rows[0].nombre}" (ID ${areaId})`]
     );
   });
 
@@ -411,10 +434,12 @@ const cambiarPrioridad = async (id, prioridad, usuarioId) => {
   const oficio = await obtenerPorId(id);
 
   if (['finalizado', 'cancelado'].includes(oficio.estado)) {
-    throw { status: 409, message: 'No se puede cambiar la prioridad de un oficio finalizado' };
+    throw { status: 409, message: 'No se puede cambiar la prioridad de un oficio en estado terminal' };
   }
 
   await withTransaction(async (client) => {
+    const prioridadAnterior = oficio.prioridad;
+
     await client.query(
       `UPDATE oficios
        SET prioridad = $1, modificado_por = $2, fecha_modificacion = NOW()
@@ -422,29 +447,51 @@ const cambiarPrioridad = async (id, prioridad, usuarioId) => {
       [prioridad, usuarioId, id]
     );
 
-    // Actualizar límites del semáforo según nueva prioridad
-    const config = await client.query(
-      `SELECT dias_verde, dias_rojo FROM configuracion_semaforo WHERE prioridad = $1`,
-      [prioridad]
-    );
-    if (config.rowCount > 0) {
-      const { dias_verde, dias_rojo } = config.rows[0];
-      await client.query(
-        `UPDATE semaforo_tiempo
-         SET dias_limite_amarillo = $1, dias_limite_rojo = $2
-         WHERE oficio_id = $3`,
-        [dias_verde, dias_rojo, id]
-      );
-    }
+    // Actualizar límites del semáforo. Usar UPSERT por si no existe el registro.
+    await _upsertSemaforo(client, id, prioridad);
 
+    // Registrar en historial como evento de auditoría (estado no cambia)
     await client.query(
-      `INSERT INTO historial_estado (oficio_id, estado_anterior, estado_nuevo, usuario_id, motivo)
+      `INSERT INTO historial_estado
+         (oficio_id, estado_anterior, estado_nuevo, usuario_id, motivo)
        VALUES ($1, $2, $2, $3, $4)`,
-      [id, oficio.estado, usuarioId, `Prioridad cambiada a "${prioridad}"`]
+      [id, oficio.estado, usuarioId, `Prioridad cambiada de "${prioridadAnterior}" a "${prioridad}"`]
     );
   });
 
   return obtenerPorId(id);
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ALERTAS (oficios en amarillo/rojo)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const obtenerAlertas = async ({ areaId } = {}) => {
+  const condiciones = [`s.estado_semaforo IN ('amarillo', 'rojo')`, `o.estado NOT IN ('finalizado', 'cancelado')`];
+  const params = [];
+  let idx = 1;
+
+  if (areaId) {
+    condiciones.push(`o.area_asignada_id = $${idx++}`);
+    params.push(areaId);
+  }
+
+  const result = await query(
+    `SELECT
+       o.id, o.numero_oficio, o.tipo_proceso, o.prioridad, o.estado, o.asunto,
+       o.fecha_recepcion,
+       a.nombre AS area_nombre,
+       s.estado_semaforo, s.dias_transcurridos,
+       s.dias_limite_amarillo, s.dias_limite_rojo
+     FROM oficios o
+     JOIN areas a           ON o.area_asignada_id = a.id
+     JOIN semaforo_tiempo s ON o.id = s.oficio_id
+     WHERE ${condiciones.join(' AND ')}
+     ORDER BY s.estado_semaforo DESC, s.dias_transcurridos DESC`,
+    params
+  );
+
+  return result.rows;
 };
 
 module.exports = {
@@ -455,4 +502,5 @@ module.exports = {
   cambiarEstado,
   asignar,
   cambiarPrioridad,
+  obtenerAlertas,
 };

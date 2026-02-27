@@ -1,20 +1,22 @@
-// server.js — actualizado con Fase 3 (Proyectos + Oficios)
+// server.js
 
 require('dotenv').config();
 
-const express      = require('express');
-const cors         = require('cors');
-const rateLimit    = require('express-rate-limit');
-const cookieParser = require('cookie-parser');
+const express    = require('express');
+const cors       = require('cors');
+const rateLimit  = require('express-rate-limit');
+const path       = require('path');
+
+const { limpiarTokensExpirados } = require('./services/auth.service');
+const { recalcularTodos }        = require('./services/semaforos.service');
 
 const authRoutes      = require('./routes/auth.routes');
 const areasRoutes     = require('./routes/areas.routes');
 const usuariosRoutes  = require('./routes/usuarios.routes');
-const proyectosRoutes = require('./routes/proyectos.routes');  // ← NUEVO
-const oficiosRoutes   = require('./routes/oficios.routes');    // ← NUEVO
-
-const { rateLimit: rateLimitConfig } = require('./config/auth');
-const { limpiarTokensExpirados }     = require('./utils/jwt');
+const proyectosRoutes = require('./routes/proyectos.routes');
+const oficiosRoutes   = require('./routes/oficios.routes');
+const archivosRoutes  = require('./routes/archivos.routes');
+const semaforosRoutes = require('./routes/semaforos.routes');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -22,23 +24,21 @@ const PORT = process.env.PORT || 3000;
 // ─── Middlewares globales ─────────────────────────────────────────────────────
 
 app.use(cors({
-  origin:         process.env.FRONTEND_URL || 'http://localhost:5173',
-  credentials:    true,
-  methods:        ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  credentials: true,
 }));
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
-app.use(cookieParser());
-app.disable('x-powered-by');
 
+// Servir archivos subidos estáticamente (solo en dev — en producción usar nginx/cloud)
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// Rate limit general
 app.use(rateLimit({
-  windowMs:        rateLimitConfig.windowMs,
-  max:             rateLimitConfig.max,
-  standardHeaders: true,
-  legacyHeaders:   false,
-  message:         { success: false, message: 'Demasiadas peticiones. Intente más tarde' },
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  message: { success: false, message: 'Demasiadas solicitudes. Intente más tarde' },
 }));
 
 // ─── Health check ─────────────────────────────────────────────────────────────
@@ -52,13 +52,10 @@ app.get('/api/health', (req, res) => {
 app.use('/api/auth',      authRoutes);
 app.use('/api/areas',     areasRoutes);
 app.use('/api/usuarios',  usuariosRoutes);
-app.use('/api/proyectos', proyectosRoutes);   // ← NUEVO
-app.use('/api/oficios',   oficiosRoutes);     // ← NUEVO
-
-// Próximas fases:
-// app.use('/api/archivos',  archivosRoutes);
-// app.use('/api/semaforos', semaforosRoutes);
-// app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/proyectos', proyectosRoutes);
+app.use('/api/oficios',   oficiosRoutes);
+app.use('/api/archivos',  archivosRoutes);
+app.use('/api/semaforos', semaforosRoutes);
 
 // ─── Error handlers ───────────────────────────────────────────────────────────
 
@@ -71,24 +68,43 @@ app.use((err, req, res, next) => {
   res.status(500).json({ success: false, message: 'Error interno del servidor' });
 });
 
-// ─── Limpieza de tokens (cada 24h) ───────────────────────────────────────────
+// ─── Tareas programadas (reemplazan los SQL Server Agent Jobs) ────────────────
 
+// Recalcular semáforos cada hora
+setInterval(async () => {
+  try {
+    await recalcularTodos();
+    console.log(`🚦 [${new Date().toISOString()}] Semáforos recalculados`);
+  } catch (err) {
+    console.error('⚠️  Error recalculando semáforos:', err.message);
+  }
+}, 60 * 60 * 1000); // cada 1 hora
+
+// Limpiar refresh tokens expirados cada 24h
 setInterval(async () => {
   try {
     const eliminados = await limpiarTokensExpirados();
-    if (eliminados > 0) console.log(`🧹 ${eliminados} refresh tokens eliminados`);
+    if (eliminados > 0) console.log(`🧹 ${eliminados} refresh tokens expirados eliminados`);
   } catch (err) {
-    console.error('⚠️  Error en limpieza:', err.message);
+    console.error('⚠️  Error en limpieza de tokens:', err.message);
   }
 }, 24 * 60 * 60 * 1000);
 
 // ─── Arranque ─────────────────────────────────────────────────────────────────
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log('\n================================');
   console.log(`🚀 Servidor en puerto ${PORT}`);
   console.log(`📋 Entorno: ${process.env.NODE_ENV || 'development'}`);
   console.log('================================\n');
+
+  // Recalcular semáforos al arrancar
+  try {
+    await recalcularTodos();
+    console.log('🚦 Semáforos inicializados al arrancar');
+  } catch (err) {
+    console.warn('⚠️  No se pudieron inicializar semáforos:', err.message);
+  }
 });
 
 module.exports = app;
